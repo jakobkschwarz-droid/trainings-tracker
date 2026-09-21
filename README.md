@@ -2,7 +2,7 @@
 
 Kostenloser Trainingsplan-Tracker als Web-App (installierbar auf iPhone und Android):
 
-- 5-Tage-Zyklus: Push → Pull → Beine → Pause → Oberkörper → Unterkörper → Pause
+- Eigener Trainingsplan: Vorlagen (5 Tage Push/Pull/Beine + Ober-/Unterkörper, 6 Tage PPL, 4 Tage Ober-/Unterkörper, 3 Tage Push/Pull/Beine oder Ganzkörper) oder komplett selbst gebaut: Tage anlegen, Reihenfolge und Pausentage festlegen, Übungen aus einer Auswahl oder eigene hinzufügen
 - Automatisch steigende Gewichte (Doppelprogression: alle Sätze an der oberen Wiederholungsgrenze → +2,5 kg)
 - Volumenvergleich je Übung und je Trainingsart, Pausentimer, Trainingskalender, Gewichtsverlauf
 - Stärke-Check mit Rängen (Bronze bis Elite) und Muskelkarte

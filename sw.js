@@ -1,4 +1,4 @@
-const CACHE = 'tt-v1';   // Präfix 'tt-': fasse nur eigene Caches an
+const CACHE = 'tt-v2';   // Präfix 'tt-': fasse nur eigene Caches an
 const FILES = ['./', './index.html', './version.json', './manifest.webmanifest', './icon-180.png', './icon-512.png'];
 self.addEventListener('install', e => { e.waitUntil(caches.open(CACHE).then(c => c.addAll(FILES)).then(() => self.skipWaiting())); });
 self.addEventListener('activate', e => {

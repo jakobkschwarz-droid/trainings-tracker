@@ -27,7 +27,7 @@ h2{font-size:17px;margin:0 0 10px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:14px;margin-bottom:12px}
 .mut{color:var(--mut)}.small{font-size:13px}
 .strip{display:flex;gap:6px;margin-bottom:12px}
-.strip button{flex:1;padding:8px 0;border-radius:10px;border:1px solid var(--line);background:var(--card);color:var(--mut);font-size:11px;font-weight:600}
+.strip button{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:8px 0;border-radius:10px;border:1px solid var(--line);background:var(--card);color:var(--mut);font-size:11px;font-weight:600}
 .strip button.on{background:var(--acc);color:#04210f;border-color:var(--acc)}
 .strip button.rest{opacity:.6}
 .row{display:flex;align-items:center;gap:8px}
@@ -88,6 +88,9 @@ textarea{height:90px;font-size:12px}
 .lift{padding:12px 0;border-top:1px solid var(--line)}
 svg text{fill:var(--mut);font-size:10px}
 body.onb nav{display:none}
+.opt{display:block;width:100%;text-align:left;background:var(--card);border:1px solid var(--line);color:var(--txt);border-radius:14px;padding:14px;margin-bottom:10px;font-size:16px}
+.opt.on{border-color:var(--acc);background:#14301f}
+.lib{display:block;width:100%;text-align:left;background:var(--card2);border:0;color:var(--txt);padding:12px;border-radius:10px;margin-bottom:6px;font-size:15px}
 .onb-dots{text-align:center;margin:4px 0 14px}
 .bullet{margin:0 0 8px;padding-left:4px}
 .cal{display:grid;grid-template-columns:repeat(7,1fr);gap:4px;text-align:center}
@@ -125,12 +128,16 @@ const dateStr = t => new Date(t).toLocaleDateString('de-DE', {day: '2-digit', mo
 const shortDate = t => { const d = new Date(t); return d.getDate() + '.' + (d.getMonth() + 1) + '.'; };
 
 /* ---------- Konstanten ---------- */
-const CYCLE = ['push', 'pull', 'legs', 'rest', 'upper', 'lower', 'rest'];
-const LABEL = {push: 'Push', pull: 'Pull', legs: 'Beine', upper: 'Oberkörper', lower: 'Unterkörper', rest: 'Pause'};
-const SHORT = {push: 'Push', pull: 'Pull', legs: 'Legs', upper: 'Ober', lower: 'Unter', rest: 'Pause'};
-const TYPES = ['push', 'pull', 'legs', 'upper', 'lower'];
+// Trainingstage sind frei konfigurierbar: S.days = [{id, name, short}], S.cycle = [Tag-ID | 'rest', ...], S.plan = {Tag-ID: [Übungen]}
+const dayName = id => id === 'rest' ? 'Pause' : ((S.days.find(d => d.id === id) || {}).name || ((S.sessions.slice().reverse().find(x => x.type === id) || {}).label) || 'Alter Tag');
+const LABEL = new Proxy({}, {get: (_, id) => dayName(id)});
+const SHORT = new Proxy({}, {get: (_, id) => id === 'rest' ? 'Pause' : ((S.days.find(d => d.id === id) || {}).short || dayName(id).slice(0, 5))});
+const dayIds = () => S.days.map(d => d.id);
+const allDayIds = () => [...new Set([...dayIds(), ...S.sessions.map(x => x.type)])];   // auch gelöschte Tage mit Verlauf
+const planOf = id => S.plan[id] || [];
+const busy = () => !!(S.draft && S.draft.entries.some(e => e.done.some(Boolean)));
 const MODES = {w: 'Gewicht', bw: 'Körpergewicht + Zusatz', r: 'Nur Wiederholungen'};
-const APP_V = 1;   // bei jeder Veröffentlichung erhöhen (auch in version.json)
+const APP_V = 2;   // bei jeder Veröffentlichung erhöhen (auch in version.json)
 const KEY = 'tt.app.v1';   // eigener Speicher, unabhängig von anderen Apps auf derselben Domain
 
 // mode: w = Hantel/Gerät, bw = Körpergewicht (+ Zusatzgewicht), r = nur Wiederholungen
@@ -144,17 +151,79 @@ function templatePlan() {
     lower: [X('low_squat', 'Kniebeugen', 3, 8, 10, 0, 120), X('low_bss', 'Bulgarian Split Squats', 3, 8, 12, 0, 120), X('low_rdl', 'Rumänisches Kreuzheben', 3, 8, 10, 0, 120), X('low_calf', 'Wadenheben (Kurzhantel)', 3, 10, 15, 0), X('low_hlr', 'Hanging Leg Raises', 3, 8, 15, 0, 60, 'r')]
   };
 }
+const TEMPLATE_INFO = {
+  ppl5: {label: '5 Tage: Push / Pull / Beine + Ober- / Unterkörper', desc: 'Push → Pull → Beine → Pause → Oberkörper → Unterkörper → Pause'},
+  ppl6: {label: '6 Tage: Push / Pull / Beine (2×)', desc: 'Push → Pull → Beine → Push → Pull → Beine → Pause'},
+  ul4: {label: '4 Tage: Oberkörper / Unterkörper (2×)', desc: 'Ober A → Unter A → Pause → Ober B → Unter B → Pause → Pause'},
+  ppl3: {label: '3 Tage: Push / Pull / Beine', desc: 'Push → Pause → Pull → Pause → Beine → Pause → Pause'},
+  fb3: {label: '3 Tage: Ganzkörper', desc: 'Ganz A → Pause → Ganz B → Pause → Ganz C → Pause → Pause'},
+  custom: {label: 'Selbst bauen (leer)', desc: 'Du legst Tage und Übungen komplett selbst an.'}
+};
+function buildTemplate(key) {
+  const P = templatePlan(), std = [['push', 'Push', 'Push'], ['pull', 'Pull', 'Pull'], ['legs', 'Beine', 'Beine'], ['upper', 'Oberkörper', 'Ober'], ['lower', 'Unterkörper', 'Unter']];
+  const mk = (list, cycle) => ({days: list.map(([id, name, short]) => ({id, name, short})), plan: JSON.parse(JSON.stringify(Object.fromEntries(list.map(([id, , , ex]) => [id, ex || P[id] || []])))), cycle});
+  if (key === 'ppl3') return mk(std.slice(0, 3), ['push', 'rest', 'pull', 'rest', 'legs', 'rest', 'rest']);
+  if (key === 'ppl6') return mk(std.slice(0, 3), ['push', 'pull', 'legs', 'push', 'pull', 'legs', 'rest']);
+  if (key === 'ul4') return mk([
+    ['uA', 'Oberkörper A', 'Ober A', [X('uA_1', 'Bankdrücken', 3, 5, 8, 0, 150), X('uA_2', 'Langhantel-Rudern', 3, 6, 10, 0, 120), X('uA_3', 'Schulterdrücken (Kurzhantel)', 3, 8, 12, 0, 120), X('uA_4', 'Klimmzüge', 3, 6, 10, 0, 120, 'bw'), X('uA_5', 'Kurzhantel-Trizeps-Extensions', 3, 10, 15, 0)]],
+    ['lA', 'Unterkörper A', 'Unt A', [X('lA_1', 'Kniebeugen', 3, 5, 8, 0, 150), X('lA_2', 'Rumänisches Kreuzheben', 3, 6, 10, 0, 120), X('lA_3', 'Bulgarian Split Squats', 3, 8, 12, 0, 120), X('lA_4', 'Wadenheben (Kurzhantel)', 3, 10, 15, 0), X('lA_5', 'Hanging Leg Raises', 3, 8, 15, 0, 60, 'r')]],
+    ['uB', 'Oberkörper B', 'Ober B', [X('uB_1', 'Kurzhantel-Schrägbankdrücken', 3, 8, 12, 0, 120), X('uB_2', 'Kurzhantel-Rudern', 3, 8, 12, 0, 120), X('uB_3', 'Seitheben', 3, 12, 15, 0), X('uB_4', 'Incline Curl (Kurzhantel)', 3, 8, 12, 0), X('uB_5', 'Fly', 3, 10, 15, 0)]],
+    ['lB', 'Unterkörper B', 'Unt B', [X('lB_1', 'Kniebeugen', 3, 8, 10, 0, 120), X('lB_2', 'Rumänisches Kreuzheben', 3, 8, 10, 0, 120), X('lB_3', 'Beinpresse', 3, 10, 12, 0, 120), X('lB_4', 'Wadenheben (Kurzhantel)', 3, 10, 15, 0), X('lB_5', 'Hanging Leg Raises', 3, 8, 15, 0, 60, 'r')]]
+  ], ['uA', 'lA', 'rest', 'uB', 'lB', 'rest', 'rest']);
+  if (key === 'fb3') return mk([
+    ['fa', 'Ganzkörper A', 'Ganz A', [X('fa_1', 'Kniebeugen', 3, 5, 8, 0, 150), X('fa_2', 'Bankdrücken', 3, 5, 8, 0, 150), X('fa_3', 'Langhantel-Rudern', 3, 6, 10, 0, 120), X('fa_4', 'Seitheben', 3, 12, 15, 0), X('fa_5', 'Hanging Leg Raises', 3, 8, 15, 0, 60, 'r')]],
+    ['fb', 'Ganzkörper B', 'Ganz B', [X('fb_1', 'Rumänisches Kreuzheben', 3, 6, 10, 0, 120), X('fb_2', 'Schulterdrücken (Kurzhantel)', 3, 8, 12, 0, 120), X('fb_3', 'Klimmzüge', 3, 6, 10, 0, 150, 'bw'), X('fb_4', 'Bulgarian Split Squats', 3, 8, 12, 0, 120), X('fb_5', 'Incline Curl (Kurzhantel)', 3, 8, 12, 0)]],
+    ['fc', 'Ganzkörper C', 'Ganz C', [X('fc_1', 'Kniebeugen', 3, 8, 10, 0, 120), X('fc_2', 'Kurzhantel-Schrägbankdrücken', 3, 8, 12, 0, 120), X('fc_3', 'Kurzhantel-Rudern', 3, 8, 12, 0, 120), X('fc_4', 'Hammer Curls', 3, 10, 15, 0), X('fc_5', 'Kurzhantel-Trizeps-Extensions', 3, 10, 15, 0)]]
+  ], ['fa', 'rest', 'fb', 'rest', 'fc', 'rest', 'rest']);
+  if (key === 'custom') return mk([['t1', 'Tag 1', 'Tag 1', []]], ['t1', 'rest']);
+  return mk(std, ['push', 'pull', 'legs', 'rest', 'upper', 'lower', 'rest']);
+}
 function freshState() {
-  return {plan: templatePlan(), pos: 0, sessions: [], draft: null, settings: {bw: 70, cmp: 'all'}, weights: [], rests: [], profile: null};
+  const T = buildTemplate('ppl5');
+  return {days: T.days, cycle: T.cycle, plan: T.plan, pos: 0, sessions: [], draft: null, settings: {bw: 70, cmp: 'all'}, weights: [], rests: [], profile: null};
+}
+
+// Übungsauswahl: [Name, Sätze, Wdh. von, Wdh. bis, Pause, Art]
+const LIB = [
+  ['Brust', [['Bankdrücken', 3, 5, 8, 150], ['Kurzhantel-Schrägbankdrücken', 3, 8, 12, 120], ['Kurzhantel-Bankdrücken', 3, 8, 12, 120], ['Fly', 3, 10, 15, 90], ['Brustpresse (Maschine)', 3, 8, 12, 90], ['Liegestütze', 3, 8, 20, 90, 'r'], ['Dips', 3, 6, 12, 120, 'bw']]],
+  ['Schultern', [['Schulterdrücken (Kurzhantel)', 3, 8, 12, 120], ['Schulterdrücken sitzend (Langhantel)', 3, 6, 10, 120], ['Seitheben', 3, 12, 15, 90], ['Reverse Fly', 3, 12, 15, 90], ['Frontheben', 3, 10, 15, 90]]],
+  ['Rücken', [['Klimmzüge', 3, 6, 10, 150, 'bw'], ['Latzug', 3, 8, 12, 120], ['Langhantel-Rudern', 3, 6, 10, 120], ['Kurzhantel-Rudern', 3, 8, 12, 120], ['Rudern am Kabel', 3, 10, 12, 90]]],
+  ['Bizeps', [['Incline Curl (Kurzhantel)', 3, 8, 12, 90], ['Hammer Curls', 3, 10, 15, 90], ['Langhantel-Curls', 3, 8, 12, 90], ['Kurzhantel-Curls', 3, 8, 12, 90]]],
+  ['Trizeps', [['Kurzhantel-Trizeps-Extensions', 3, 10, 15, 90], ['Trizepsdrücken (Kabel)', 3, 10, 15, 90]]],
+  ['Beine', [['Kniebeugen', 3, 5, 8, 150], ['Rumänisches Kreuzheben', 3, 6, 10, 120], ['Stiff-Legged Deadlift', 3, 6, 10, 120], ['Sumo Deadlift', 3, 6, 10, 120], ['Bulgarian Split Squats', 3, 8, 12, 120], ['Beinpresse', 3, 8, 12, 120], ['Ausfallschritte', 3, 10, 12, 90], ['Beinstrecker', 3, 10, 15, 90], ['Beinbeuger', 3, 10, 15, 90], ['Hip Thrust', 3, 8, 12, 120], ['Wadenheben (Kurzhantel)', 3, 10, 15, 60]]],
+  ['Bauch', [['Hanging Leg Raises', 3, 8, 15, 60, 'r'], ['Crunches', 3, 12, 20, 60, 'r']]]
+];
+function libModal(day) {
+  return `<div class="modal"><div class="sheet"><div class="row"><h2 style="margin:0">Übung hinzufügen</h2><div class="sp"></div><button class="link" data-act="closemodal">Schließen</button></div>
+    <input class="nm" data-libq placeholder="Suchen …" style="margin-top:10px">
+    ${LIB.map(([cat, items], ci) => `<div class="libcat"><div class="small mut" style="margin:10px 0 4px">${cat}</div>${items.map((it, ii) => `<button class="lib" data-act="libadd" data-t="${day}" data-c="${ci}" data-i="${ii}">${esc(it[0])} <span class="mut small">· ${it[1]}×${it[2]}–${it[3]}${it[5] === 'r' ? ' Wdh.' : ''}</span></button>`).join('')}</div>`).join('')}
+    <div class="card" style="margin-top:12px"><b>Eigene Übung</b><input class="nm" data-libname placeholder="Name der Übung" style="margin-top:8px">
+      <div class="f"><label>Art</label><select data-libmode><option value="w">Gewicht</option><option value="bw">Körpergewicht + Zusatz</option><option value="r">Nur Wiederholungen</option></select></div>
+      <button class="btn sm" style="margin-top:10px" data-act="libcustom" data-t="${day}">Hinzufügen</button></div></div></div>`;
+}
+function addExercise(day, name, mode, sets, min, max, rest) {
+  const ex = X(day + '_' + uid(), name, sets, min, max, 0, rest, mode);
+  ex.weight = startWeight(ex, S.profile || {level: 'beginner'}, latestKg());
+  S.plan[day] = planOf(day).concat([ex]);
+}
+function migrateState(d) {
+  if (!Array.isArray(d.days) || !Array.isArray(d.cycle)) {   // Stand vor den frei wählbaren Plänen: fester 5-Tage-Plan
+    const nm = {push: ['Push', 'Push'], pull: ['Pull', 'Pull'], legs: ['Beine', 'Beine'], upper: ['Oberkörper', 'Ober'], lower: ['Unterkörper', 'Unter']};
+    d.days = Object.keys(d.plan).map(id => ({id, name: (nm[id] || [id])[0], short: (nm[id] || [0, id.slice(0, 5)])[1]}));
+    d.cycle = ['push', 'pull', 'legs', 'rest', 'upper', 'lower', 'rest'].filter(x => x === 'rest' || d.plan[x]);
+  }
+  d.days.forEach(x => { if (!d.plan[x.id]) d.plan[x.id] = []; });
+  if (!d.cycle.some(x => x !== 'rest')) d.cycle = d.days.length ? [d.days[0].id, 'rest'] : d.cycle;
+  if (!Number.isInteger(d.pos) || d.pos < 0 || d.pos >= d.cycle.length) d.pos = 0;
 }
 
 // Startgewichte: aus den Vergleichswerten geschätzt (Erfahrung + Körpergewicht + Geschlecht), Vorgaben des Nutzers haben Vorrang
 const LEVEL_P = {beginner: 10, mid: 35, adv: 60};   // Prozent der Lifter, die man als Startniveau annimmt
 const MAIN = [
-  {k: 'bench', label: 'Bankdrücken', ids: ['push_bench', 'up_bench']},
-  {k: 'squat', label: 'Kniebeugen', ids: ['legs_squat', 'low_squat']},
-  {k: 'dead', label: 'Rumänisches Kreuzheben', ids: ['legs_rdl', 'low_rdl']},
-  {k: 'ohp', label: 'Schulterdrücken (Kurzhantel, pro Hantel)', ids: ['push_ohp']}
+  {k: 'bench', label: 'Bankdrücken', keys: ['bench']},
+  {k: 'squat', label: 'Kniebeugen', keys: ['squat']},
+  {k: 'dead', label: 'Kreuzheben (Rumänisch / Stiff-Legged / Sumo)', keys: ['rdl', 'sldl', 'sumo']},
+  {k: 'ohp', label: 'Schulterdrücken (bei Kurzhanteln pro Hantel)', keys: ['dbpress', 'ohp']}
 ];
 function liftDefFor(name) {
   return LIFT_DEFS.find(D => D.re.test(name) && !(D.not && D.not.test(name)) && !(D.need && !D.need.test(name))) || null;
@@ -162,7 +231,7 @@ function liftDefFor(name) {
 function startWeight(ex, prof, bw) {
   if (ex.mode !== 'w') return 0;
   const D = liftDefFor(ex.name);
-  if (!D || D.reps) return {beginner: 10, mid: 15, adv: 20}[prof.level] || 10;
+  if (!D || D.reps) return Math.max(2.5, Math.floor(bw * ({beginner: 0.2, mid: 0.3, adv: 0.45}[prof.level] || 0.2) / 2.5) * 2.5);   // Faustformel für Übungen ohne Vergleichswerte
   const v = valAtP(stdAt(D.key, bw), LEVEL_P[prof.level] || 10);
   const w = v / (1 + (ex.min + ex.max) / 2 / 30);
   const bar = /langhantel|bankdrück|kniebeug|kreuzheb|deadlift/i.test(ex.name) ? 20 : 2.5;   // Langhantelstange wiegt 20 kg
@@ -174,7 +243,7 @@ function applyStart(plan, prof, bw, given) {
   MAIN.forEach(m => {
     const g = num(given[m.k]);
     if (!isFinite(g) || g <= 0) return;
-    all.filter(ex => m.ids.includes(ex.id)).forEach(ex => { ex.weight = Math.max(2.5, Math.round(g * (1 + 8 / 30) / (1 + (ex.min + ex.max) / 2 / 30) / 2.5) * 2.5); });   // Angabe gilt für ca. 8 Wdh.
+    all.filter(ex => { const D = liftDefFor(ex.name); return D && m.keys.includes(D.key); }).forEach(ex => { ex.weight = Math.max(2.5, Math.round(g * (1 + 8 / 30) / (1 + (ex.min + ex.max) / 2 / 30) / 2.5) * 2.5); });   // Angabe gilt für ca. 8 Wdh.
   });
 }
 
@@ -190,6 +259,7 @@ function load() {
         d.settings = Object.assign({bw: 70, cmp: 'all'}, d.settings);
         if (!Array.isArray(d.weights)) d.weights = [];
         if (!Array.isArray(d.rests)) d.rests = [];
+        migrateState(d);
         return d;
       }
     } catch (e) {}
@@ -210,7 +280,7 @@ function addWeight(kg) {
   if (ex) { ex.kg = kg; ex.date = Date.now(); } else S.weights.push({id: uid(), date: Date.now(), kg});
   S.weights.sort((a, b) => a.date - b.date);
   S.settings.bw = latestKg();
-  invalidateDraft('pull'); invalidateDraft('upper');
+  S.days.forEach(d => invalidateDraft(d.id));
   save();
 }
 
@@ -232,7 +302,7 @@ const wLabel = e => {
   return vary ? e.ws.map(fmt).join(' / ') + ' kg' : fmt(e.weight) + ' kg';
 };
 function exList(type) {
-  const list = S.plan[type].map(p => ({id: p.id, name: p.name, mode: p.mode, plan: p}));
+  const list = planOf(type).map(p => ({id: p.id, name: p.name, mode: p.mode, plan: p}));
   const seen = new Set(list.map(x => x.id));
   S.sessions.filter(s => s.type === type).forEach(s => s.entries.forEach(e => {
     if (!seen.has(e.exId)) { seen.add(e.exId); list.push({id: e.exId, name: e.name, mode: e.mode, old: true}); }
@@ -258,7 +328,7 @@ function ensureDraft(type) {
   if (!S.draft || S.draft.type !== type) {
     S.draft = {
       type, start: Date.now(),
-      entries: S.plan[type].map(p => {
+      entries: planOf(type).map(p => {
         const pe = lastEntry(p.id);
         // Gleiches Gewicht wie letztes Mal: Wiederholungen von damals vorschlagen, sonst von der unteren Grenze starten
         const reps = Array.from({length: p.sets}, (_, i) => pe && pe.mode === p.mode && setW(pe, i) === p.weight && pe.reps[i] ? Math.min(99, pe.reps[i]) : p.min);
@@ -272,17 +342,17 @@ function ensureDraft(type) {
 
 /* ---------- Render ---------- */
 const isStandalone = () => window.navigator.standalone === true || (window.matchMedia && matchMedia('(display-mode: standalone)').matches);
-function onbInit() { return {step: 0, d: {name: '', sex: 'm', bw: '', height: '', goal: 'gain', level: 'beginner', lifts: {bench: '', squat: '', dead: '', ohp: ''}, ok: false}}; }
+function onbInit() { return {step: 0, d: {name: '', sex: 'm', bw: '', height: '', goal: 'gain', level: 'beginner', lifts: {bench: '', squat: '', dead: '', ohp: ''}, plan: 'ppl5', ok: false}}; }
 function viewOnboarding() {
   const o = ui.onb || (ui.onb = onbInit()), d = o.d;
   const ch = (k, v, label) => `<button class="chip ${d[k] === v ? 'on' : ''}" data-act="onbset" data-k="${k}" data-v="${v}">${label}</button>`;
-  const dots = `<div class="onb-dots">${[0, 1, 2, 3].map(i => `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;margin:0 3px;background:${i <= o.step ? 'var(--acc)' : 'var(--line)'}"></span>`).join('')}</div>`;
+  const dots = `<div class="onb-dots">${[0, 1, 2, 3, 4].map(i => `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;margin:0 3px;background:${i <= o.step ? 'var(--acc)' : 'var(--line)'}"></span>`).join('')}</div>`;
   const nav = (next) => `<div class="row" style="margin-top:16px">${o.step > 0 ? '<button class="btn sec" style="width:auto;padding:15px 20px" data-act="onbback">Zurück</button>' : ''}<button class="btn" data-act="onbnext">${next}</button></div>`;
   let h = dots;
   if (o.step === 0) {
     const ios = /iphone|ipad|ipod/i.test(navigator.userAgent);
     h += `<h1>Willkommen 👋</h1><p>Dein Trainingsplan mit <b>automatisch steigenden Gewichten</b>, Vergleich mit deinem letzten Training und einem Stärke-Check.</p>
-      <div class="card"><div class="bullet">🗓️ <b>5-Tage-Plan:</b> Push → Pull → Beine → Pause → Oberkörper → Unterkörper → Pause</div>
+      <div class="card"><div class="bullet">🗓️ <b>Dein eigener Plan:</b> Vorlagen (Push/Pull/Beine, Ober-/Unterkörper, Ganzkörper) oder komplett selbst gebaut</div>
         <div class="bullet">📈 <b>Fortschritt:</b> Volumen je Übung und je Trainingsart im Vergleich zum letzten Mal</div>
         <div class="bullet">💪 <b>Stärke-Check:</b> Wie stark bist du im Vergleich zu anderen? Mit Muskelkarte</div>
         <div class="bullet" style="margin:0">⏱️ <b>Pausentimer</b>, Trainingskalender und Gewichtsverlauf</div></div>
@@ -296,13 +366,15 @@ function viewOnboarding() {
       <div class="f" style="margin-top:10px"><label>Größe in cm (optional)</label><input inputmode="numeric" data-onb="height" value="${esc(d.height)}" placeholder="z. B. 180"></div>
       <div class="small mut" style="margin:14px 0 4px">Ziel</div><div class="chips">${ch('goal', 'gain', 'Zunehmen')}${ch('goal', 'keep', 'Halten')}${ch('goal', 'lose', 'Abnehmen')}</div></div>${nav('Weiter')}`;
   } else if (o.step === 2) {
+    h += `<h1>Dein Plan</h1><p class="small mut">Wähle eine Vorlage. Du kannst später alles ändern: Tage, Reihenfolge und Übungen.</p>` + Object.keys(TEMPLATE_INFO).map(k => `<button class="opt ${d.plan === k ? 'on' : ''}" data-act="onbset" data-k="plan" data-v="${k}"><b>${TEMPLATE_INFO[k].label}</b><div class="small mut" style="margin-top:4px">${TEMPLATE_INFO[k].desc}</div></button>`).join('') + nav('Weiter');
+  } else if (o.step === 3) {
     h += `<h1>Dein Training</h1><div class="card"><div class="small mut" style="margin-bottom:6px">Wie lange trainierst du schon mit Gewichten?</div>
       <div class="chips" style="flex-wrap:wrap">${ch('level', 'beginner', 'Einsteiger (bis ca. 6 Monate)')}${ch('level', 'mid', 'Fortgeschritten (6 Monate–2 Jahre)')}${ch('level', 'adv', 'Erfahren (über 2 Jahre)')}</div>
       <div class="small mut" style="margin:14px 0 8px">Kennst du deine Gewichte? Trage ein, mit wie viel du etwa <b>8 Wiederholungen</b> schaffst. Leer lassen = die App schätzt es für dich.</div>
       ${MAIN.map(m => `<div class="f" style="margin-bottom:8px"><label>${m.label} (kg)</label><input inputmode="decimal" data-onb="lift.${m.k}" value="${esc(d.lifts[m.k])}" placeholder="schätzen lassen"></div>`).join('')}
       <div class="small mut">Alle anderen Übungen schätzt die App aus deinem Gewicht und deiner Erfahrung. Später kannst du alles im Plan-Tab ändern, und beim ersten Training siehst du jedes Gewicht noch einmal.</div></div>${nav('Weiter')}`;
   } else {
-    h += `<h1>Fast geschafft</h1><div class="card"><p style="margin-top:0">Wir erstellen deinen 5-Tage-Plan mit <b>3 Sätzen je Übung</b>. Schaffst du in allen Sätzen die obere Wiederholungszahl, steigt das Gewicht automatisch um 2,5 kg.</p>
+    h += `<h1>Fast geschafft</h1><div class="card"><p style="margin-top:0">Wir erstellen deinen Plan (<b>${TEMPLATE_INFO[d.plan].label}</b>) und schätzen die Startgewichte. Schaffst du in allen Sätzen die obere Wiederholungszahl, steigt das Gewicht automatisch um 2,5 kg. Tage, Reihenfolge und Übungen änderst du jederzeit im Plan-Tab.</p>
       <div class="small mut">Klimmzüge zu schwer? Tausche sie im Plan-Tab gegen eine andere Übung, z. B. Latzug.</div></div>
       <div class="card"><div class="small" style="margin-bottom:8px">• Die App ist <b>keine medizinische oder trainerische Beratung</b>. Training auf eigene Verantwortung; bei Beschwerden oder Vorerkrankungen vorher ärztlichen Rat einholen.<br>• Deine Daten bleiben <b>nur auf deinem Gerät</b>. Es gibt kein Konto und kein Tracking. Beim Aufruf der Seite verarbeitet der Hoster (GitHub) technisch bedingt deine IP-Adresse.<br>• Vergleichswerte: Strength Level, grobe Schätzung.</div>
       <button class="chip ${d.ok ? 'on' : ''}" data-act="onbok" style="width:100%;padding:12px">${d.ok ? '✓ ' : ''}Ich habe die Hinweise gelesen und bin einverstanden</button></div>${nav('Plan erstellen')}`;
@@ -313,7 +385,7 @@ function finishOnboarding() {
   const d = ui.onb.d, bw = Math.round(num(d.bw) * 10) / 10, h = d.height === '' ? null : Math.round(num(d.height));
   S.profile = {name: d.name.trim().slice(0, 30), sex: d.sex === 'f' ? 'f' : 'm', height: h, goal: d.goal, level: d.level, created: Date.now()};
   S.weights = [{id: uid(), date: Date.now(), kg: bw}]; S.settings.bw = bw; S.settings.cmp = 'all';
-  S.plan = templatePlan(); applyStart(S.plan, S.profile, bw, d.lifts);
+  const T = buildTemplate(d.plan in TEMPLATE_INFO ? d.plan : 'ppl5'); S.days = T.days; S.plan = T.plan; S.cycle = T.cycle; applyStart(S.plan, S.profile, bw, d.lifts);
   S.pos = 0; S.draft = null; S.sessions = []; S.rests = [];
   save(); ui.onb = null; ui.tab = 'today';
 }
@@ -328,8 +400,8 @@ function render() {
 }
 
 function viewToday() {
-  const type = CYCLE[S.pos];
-  const strip = CYCLE.map((t, i) => `<button data-act="setpos" data-i="${i}" class="${i === S.pos ? 'on' : ''} ${t === 'rest' ? 'rest' : ''}">${SHORT[t]}</button>`).join('');
+  const type = S.cycle[S.pos];
+  const strip = S.cycle.map((t, i) => `<button data-act="setpos" data-i="${i}" class="${i === S.pos ? 'on' : ''} ${t === 'rest' ? 'rest' : ''}">${SHORT[t]}</button>`).join('');
   const lw = S.weights[S.weights.length - 1];
   const due = !lw || (Date.now() - lw.date) / 86400000 >= 7;
   let h = `<h1>${type === 'rest' ? 'Pausetag 😴' : LABEL[type]}</h1><div class="strip">${strip}</div>` + (due ? `<div class="card"><b>⚖️ Wiegen fällig</b><div class="small mut">${lw ? 'Zuletzt ' + fmt(lw.kg) + ' kg am ' + dateStr(lw.date) : 'Noch keine Wägung'}</div>
@@ -339,6 +411,7 @@ function viewToday() {
       <p class="mut small">Tipp: Oben auf einen anderen Tag tippen, um die Reihenfolge anzupassen.</p>`;
   }
   const d = ensureDraft(type), prev = lastSession(type);
+  if (!d.entries.length) return h + `<div class="card"><b>Dieser Tag hat noch keine Übungen.</b><div class="small mut" style="margin-top:6px">Öffne den Plan-Tab und füge Übungen hinzu.</div><button class="btn" style="margin-top:12px" data-act="gotoplan">Zum Plan</button></div>`;
   const cur = sessVol(d);
   h += `<div class="card"><div class="row"><div><div class="mut small">Volumen heute</div><div style="font-size:26px;font-weight:800">${fmt(cur)} kg</div></div><div class="sp"></div><div style="text-align:right" class="small"><div class="mut">vs. letztes ${LABEL[type]}${prev ? ' (' + dateStr(prev.date) + ')' : ''}</div>${!prev ? '<span class="flat">erstes Mal</span>' : d.entries.every(x => x.done.every(Boolean)) ? delta(cur, sessVol(prev)) : `<span class="flat">Ziel: ${fmt(sessVol(prev))} kg</span>`}</div></div></div>`;
   d.entries.forEach((e, i) => {
@@ -686,8 +759,9 @@ function weightCard() {
 }
 
 function viewProgress() {
+  const ids = allDayIds(); if (!ids.includes(ui.progType)) ui.progType = ids[0];
   const type = ui.progType;
-  const chips = TYPES.map(t => `<button class="chip ${t === type ? 'on' : ''}" data-act="ptype" data-t="${t}">${LABEL[t]}</button>`).join('');
+  const chips = ids.map(t => `<button class="chip ${t === type ? 'on' : ''}" data-act="ptype" data-t="${t}">${LABEL[t]}</button>`).join('');
   const sess = S.sessions.filter(s => s.type === type);
   let h = `<h1>Fortschritt</h1>${strengthCard()}${weightCard()}<h2 style="margin-top:6px">Training</h2><div class="chips">${chips}</div>`;
   const vols = sess.map(sessVol);
@@ -741,11 +815,23 @@ function profileCard() {
     <div class="small mut" style="margin:6px 0 4px">Ziel</div><div class="chips">${ch('goal', 'gain', 'Zunehmen')}${ch('goal', 'keep', 'Halten')}${ch('goal', 'lose', 'Abnehmen')}</div>
     <div class="f" style="margin-top:6px"><label>Größe in cm (optional)</label><input inputmode="numeric" data-prof="height" value="${p.height || ''}"></div></div>`;
 }
+function cycleCard() {
+  const b = 'style="width:36px;height:36px;font-size:16px"';
+  const rows = S.cycle.map((id, i) => `<div class="row" style="padding:6px 0;border-top:1px solid var(--line)"><span class="mut small" style="width:22px">${i + 1}</span><b style="flex:1">${id === 'rest' ? '😴 Pause' : esc(dayName(id))}</b><button class="step" ${b} data-act="cycmove" data-i="${i}" data-d="-1">↑</button><button class="step" ${b} data-act="cycmove" data-i="${i}" data-d="1">↓</button><button class="step" ${b} data-act="cycdel" data-i="${i}">✕</button></div>`).join('');
+  return `<div class="card"><h2>🗓️ Ablauf</h2><div class="small mut" style="margin-bottom:6px">Die Reihenfolge deiner Tage. Nach dem letzten Tag geht es wieder von vorn. Ein Tag darf mehrmals vorkommen.</div>${rows}
+    <div class="row" style="margin-top:10px"><select id="cyc-add" class="dinp" style="flex:1;min-width:0"><option value="rest">😴 Pausetag</option>${S.days.map(d => `<option value="${d.id}">${esc(d.name)}</option>`).join('')}</select><button class="btn sm" data-act="cycadd">+ Hinzufügen</button></div></div>`;
+}
+function tplCard() {
+  return `<div class="card"><h2>📋 Vorlage laden</h2><p class="small mut">Ersetzt Ablauf und Übungen durch eine Vorlage. Dein bisheriger Verlauf bleibt erhalten.</p>
+    <div class="row"><select id="tpl-sel" class="dinp" style="flex:1;min-width:0">${Object.keys(TEMPLATE_INFO).map(k => `<option value="${k}">${TEMPLATE_INFO[k].label}</option>`).join('')}</select><button class="btn sm" data-act="tplload">Laden</button></div></div>`;
+}
 function viewPlan() {
-  let h = `<h1>Plan</h1><p class="mut small">Ablauf: Push → Pull → Beine → Pause → Oberkörper → Unterkörper → Pause → wieder von vorn.<br>Steigerung: Schaffst du in <b>allen Sätzen die obere Wdh.-Grenze</b>, steigt das Gewicht um den Schritt. Vorher bleibt es.</p>`;
-  TYPES.forEach(t => {
-    h += `<div class="card"><h2>${LABEL[t]}</h2>`;
-    S.plan[t].forEach((e, i) => {
+  let h = `<h1>Plan</h1><p class="mut small">Baue deinen Plan selbst: Tage anlegen, Reihenfolge festlegen, Übungen hinzufügen.<br>Steigerung: Schaffst du in <b>allen Sätzen die obere Wdh.-Grenze</b>, steigt das Gewicht um den Schritt. Vorher bleibt es.</p>` + cycleCard();
+  S.days.forEach(day => {
+    const t = day.id;
+    h += `<div class="card"><input class="nm" data-dayname="${t}" value="${esc(day.name)}" maxlength="24" style="font-size:18px">`;
+    if (!planOf(t).length) h += '<p class="small mut">Noch keine Übungen. Füge unten welche hinzu.</p>';
+    planOf(t).forEach((e, i) => {
       const a = (f, v, mode = 'numeric') => `<input inputmode="${mode}" data-plan="${f}" data-t="${t}" data-i="${i}" value="${v}">`;
       h += `<div class="exrow"><input class="nm" data-plan="name" data-t="${t}" data-i="${i}" value="${esc(e.name)}">
         <div class="grid3 f">
@@ -759,8 +845,9 @@ function viewPlan() {
         <div class="f"><label>Art</label><select data-plan="mode" data-t="${t}" data-i="${i}">${Object.keys(MODES).map(m => `<option value="${m}" ${m === e.mode ? 'selected' : ''}>${MODES[m]}</option>`).join('')}</select></div>
         <div class="row" style="margin-top:6px"><button class="link" data-act="pmove" data-t="${t}" data-i="${i}" data-d="-1">↑ hoch</button><button class="link" data-act="pmove" data-t="${t}" data-i="${i}" data-d="1">↓ runter</button><div class="sp"></div><button class="link" data-act="pdel" data-t="${t}" data-i="${i}">Entfernen</button></div></div>`;
     });
-    h += `<button class="btn sec sm" data-act="padd" data-t="${t}">+ Übung hinzufügen</button></div>`;
+    h += `<div class="row" style="margin-top:8px"><button class="btn sec sm" data-act="padd" data-t="${t}">+ Übung hinzufügen</button><div class="sp"></div><button class="link" data-act="daydel" data-t="${t}">Tag löschen</button></div></div>`;
   });
+  h += `<button class="btn sec" data-act="dayadd" style="margin-bottom:12px">+ Neuen Trainingstag anlegen</button>` + tplCard();
   h += profileCard() + `<div class="card"><h2>Backup</h2><p class="small mut">Alle Daten liegen nur auf diesem Gerät. Kopiere ab und zu ein Backup und speichere es z. B. in Notizen.</p>
     <button class="btn sec sm" data-act="export">Backup kopieren</button>
     <textarea id="imp" placeholder="Backup hier einfügen …" style="margin-top:10px"></textarea>
@@ -825,11 +912,11 @@ function finish() {
   const open = d.entries.reduce((a, e) => a + e.done.filter(x => !x).length, 0);
   if (d.entries.every(e => e.done.every(x => !x))) { toast('Noch kein Satz abgehakt'); return; }
   if (!confirm(open ? `${open} Satz/Sätze nicht abgehakt – sie zählen als nicht gemacht. Trotzdem speichern?` : 'Training abschließen und speichern?')) return;
-  const session = {id: uid(), date: Date.now(), type: d.type, entries: d.entries.map(e => { const c = {...e, reps: effReps(e).slice()}; delete c.done; return c; })};
+  const session = {id: uid(), date: Date.now(), type: d.type, label: LABEL[d.type], entries: d.entries.map(e => { const c = {...e, reps: effReps(e).slice()}; delete c.done; return c; })};
   const prev = lastSession(d.type);
   let lines = '';
   session.entries.forEach(e => {
-    const pe = lastEntry(e.exId), hit = hitAll(e), px = S.plan[d.type].find(p => p.id === e.exId);
+    const pe = lastEntry(e.exId), hit = hitAll(e), px = planOf(d.type).find(p => p.id === e.exId);
     let msg, cls = 'mut';
     if (e.mode === 'r') { msg = hit ? '🎉 Obergrenze erreicht – nächstes Mal schwerer machen' : '➡ Weiter bis ' + e.max + ' Wdh. in allen Sätzen'; cls = hit ? 'up' : 'mut'; }
     else {
@@ -841,7 +928,7 @@ function finish() {
     lines += `<div style="padding:8px 0;border-top:1px solid var(--line)"><b>${esc(e.name)}</b> <span class="small mut">${e.reps.join('/')} @ ${wLabel(e)}</span><div class="small">${pe ? delta(entryVol(e), entryVol(pe), unit(e)) : 'erstes Mal'}</div><div class="small ${cls}">${msg}</div></div>`;
   });
   S.sessions.push(session);
-  S.pos = (S.pos + 1) % CYCLE.length;
+  S.pos = (S.pos + 1) % S.cycle.length;
   S.draft = null; T = null; tickTimer();
   try { wake && wake.release(); } catch (e) {}
   save();
@@ -861,7 +948,7 @@ document.addEventListener('click', ev => {
     case 'setpos': if (S.pos !== i) { if (d && d.entries.some(e => e.done.some(Boolean)) && !confirm('Angefangenes Training verwerfen?')) return; S.pos = i; S.draft = null; save(); } break;
     case 'restdone':
       if (!S.rests.some(x => dayKey(x.date) === dayKey(Date.now()))) S.rests.push({id: uid(), date: Date.now()});
-      S.pos = (S.pos + 1) % CYCLE.length; save(); break;
+      S.pos = (S.pos + 1) % S.cycle.length; save(); break;
     case 'calprev': case 'calnext': {
       const c = ui.cal, n = new Date(c.y, c.m + (act === 'calprev' ? -1 : 1), 1); ui.cal = {y: n.getFullYear(), m: n.getMonth()}; break;
     }
@@ -876,7 +963,7 @@ document.addEventListener('click', ev => {
       else { const [y, m, d] = k.split('-').map(Number); S.rests.push({id: uid(), date: k === tk ? Date.now() : new Date(y, m - 1, d, 12).getTime()}); }
       save(); break;
     }
-    case 'skip': if (!confirm('Diesen Tag überspringen? Eingaben gehen verloren.')) return; S.pos = (S.pos + 1) % CYCLE.length; S.draft = null; save(); break;
+    case 'skip': if (!confirm('Diesen Tag überspringen? Eingaben gehen verloren.')) return; S.pos = (S.pos + 1) % S.cycle.length; S.draft = null; save(); break;
     case 'w-': d.entries[i].weight = Math.max(0, round025(d.entries[i].weight - d.entries[i].inc)); save(); break;
     case 'w+': d.entries[i].weight = round025(d.entries[i].weight + d.entries[i].inc); save(); break;
     case 'r-': d.entries[i].reps[s] = Math.max(0, d.entries[i].reps[s] - 1); save(); break;
@@ -902,7 +989,7 @@ document.addEventListener('click', ev => {
         if (!isFinite(v) || v < 30 || v > 250) { toast('Bitte dein Körpergewicht in kg eingeben'); return; }
         if (h !== null && (!isFinite(h) || h < 120 || h > 230)) { toast('Größe bitte in cm (120–230) oder leer lassen'); return; }
       }
-      if (o.step === 3) { if (!d.ok) { toast('Bitte bestätige die Hinweise'); return; } finishOnboarding(); } else o.step++;
+      if (o.step === 4) { if (!d.ok) { toast('Bitte bestätige die Hinweise'); return; } finishOnboarding(); } else o.step++;
       $('#main').scrollTop = 0; break;
     }
     case 'profset': S.profile[b.dataset.k] = b.dataset.v; save(); break;
@@ -930,7 +1017,50 @@ document.addEventListener('click', ev => {
       addWeight(Math.round(v * 10) / 10); toast('Gespeichert ✓'); break;
     }
     case 'wdel': if (!confirm('Diese Wägung löschen?')) return; S.weights = S.weights.filter(w => w.id !== b.dataset.id); S.settings.bw = latestKg(); save(); break;
-    case 'padd': S.plan[b.dataset.t].push(X('x_' + uid(), 'Neue Übung', 3, 8, 12, 20)); invalidateDraft(b.dataset.t); save(); break;
+    case 'padd': ui.modal = libModal(b.dataset.t); break;
+    case 'libadd': {
+      const it = LIB[+b.dataset.c][1][+b.dataset.i];
+      addExercise(b.dataset.t, it[0], it[5] || 'w', it[1], it[2], it[3], it[4]);
+      invalidateDraft(b.dataset.t); ui.modal = null; save(); toast(it[0] + ' hinzugefügt ✓'); break;
+    }
+    case 'libcustom': {
+      const nm = document.querySelector('[data-libname]').value.trim().slice(0, 40), md = document.querySelector('[data-libmode]').value;
+      if (!nm) { toast('Bitte einen Namen eingeben'); return; }
+      addExercise(b.dataset.t, nm, md, 3, md === 'r' ? 8 : 8, md === 'r' ? 20 : 12, 90);
+      invalidateDraft(b.dataset.t); ui.modal = null; save(); toast(nm + ' hinzugefügt ✓'); break;
+    }
+    case 'gotoplan': ui.tab = 'plan'; break;
+    case 'dayadd': {
+      if (S.days.length >= 10) { toast('Maximal 10 Trainingstage'); return; }
+      const id = 'd_' + uid(), n = S.days.length + 1;
+      S.days.push({id, name: 'Tag ' + n, short: 'Tag ' + n}); S.plan[id] = []; S.cycle.push(id); save(); break;
+    }
+    case 'daydel': {
+      if (busy()) { toast('Beende erst dein laufendes Training'); return; }
+      const id = b.dataset.t, rest = S.cycle.filter(x => x !== id);
+      if (!rest.some(x => x !== 'rest')) { toast('Mindestens ein Trainingstag muss im Ablauf bleiben'); return; }
+      if (!confirm('Diesen Tag löschen? Der bisherige Verlauf bleibt im Fortschritt-Tab erhalten.')) return;
+      S.days = S.days.filter(x => x.id !== id); delete S.plan[id]; S.cycle = rest; S.draft = null; if (S.pos >= S.cycle.length) S.pos = 0; save(); break;
+    }
+    case 'cycadd': S.cycle.push(document.getElementById('cyc-add').value); save(); break;
+    case 'cycdel': {
+      if (busy()) { toast('Beende erst dein laufendes Training'); return; }
+      const rest = S.cycle.filter((_, k) => k !== i);
+      if (!rest.some(x => x !== 'rest')) { toast('Mindestens ein Trainingstag muss im Ablauf bleiben'); return; }
+      S.cycle = rest; if (S.pos >= S.cycle.length) S.pos = 0; S.draft = null; save(); break;
+    }
+    case 'cycmove': {
+      if (busy()) { toast('Beende erst dein laufendes Training'); return; }
+      const j = i + (+b.dataset.d);
+      if (j < 0 || j >= S.cycle.length) return;
+      [S.cycle[i], S.cycle[j]] = [S.cycle[j], S.cycle[i]]; if (S.pos === i) S.pos = j; else if (S.pos === j) S.pos = i; save(); break;
+    }
+    case 'tplload': {
+      if (busy()) { toast('Beende erst dein laufendes Training'); return; }
+      if (!confirm('Ablauf und Übungen durch die Vorlage ersetzen? Dein bisheriger Verlauf bleibt erhalten.')) return;
+      const T = buildTemplate(document.getElementById('tpl-sel').value);
+      S.days = T.days; S.plan = T.plan; S.cycle = T.cycle; applyStart(S.plan, S.profile || {level: 'beginner'}, latestKg(), {}); S.pos = 0; S.draft = null; save(); toast('Vorlage geladen ✓'); break;
+    }
     case 'pdel': if (!confirm('Übung aus dem Plan entfernen? (Bisherige Trainings bleiben gespeichert)')) return; S.plan[b.dataset.t].splice(i, 1); invalidateDraft(b.dataset.t); save(); break;
     case 'pmove': {
       const arr = S.plan[b.dataset.t], j = i + (+b.dataset.d);
@@ -947,7 +1077,10 @@ document.addEventListener('click', ev => {
         const d2 = JSON.parse($('#imp').value);
         if (!d2 || !d2.plan || !Array.isArray(d2.sessions)) throw 0;
         if (!confirm('Aktuelle Daten durch das Backup ersetzen?')) return;
-        S = {plan: d2.plan, pos: Number.isInteger(d2.pos) ? d2.pos : 0, sessions: d2.sessions, draft: null, settings: Object.assign({bw: 63}, d2.settings), weights: Array.isArray(d2.weights) && d2.weights.length ? d2.weights : [{id: uid(), date: Date.now(), kg: (d2.settings && d2.settings.bw) || 63}], rests: Array.isArray(d2.rests) ? d2.rests : []}; save(); toast('Wiederhergestellt ✓');
+        S = Object.assign(freshState(), d2, {draft: null});
+        S.settings = Object.assign({bw: 70, cmp: 'all'}, S.settings); if (!Array.isArray(S.weights)) S.weights = []; if (!Array.isArray(S.rests)) S.rests = [];
+        if (!S.profile) S.profile = {name: '', sex: 'm', height: null, goal: 'gain', level: 'beginner', created: Date.now()};
+        migrateState(S); save(); toast('Wiederhergestellt ✓');
       } catch (e) { toast('Ungültiges Backup'); return; }
       break;
     }
@@ -958,10 +1091,20 @@ document.addEventListener('click', ev => {
 
 document.addEventListener('input', ev => {
   const t = ev.target;
+  if (t.dataset.libq !== undefined) {
+    const q = t.value.trim().toLowerCase();
+    document.querySelectorAll('.lib').forEach(x => { x.style.display = x.textContent.toLowerCase().includes(q) ? '' : 'none'; });
+    document.querySelectorAll('.libcat').forEach(c => { c.style.display = [...c.querySelectorAll('.lib')].some(x => x.style.display !== 'none') ? '' : 'none'; });
+  }
   if (t.dataset.onb && ui.onb) { if (t.dataset.onb.startsWith('lift.')) ui.onb.d.lifts[t.dataset.onb.slice(5)] = t.value; else ui.onb.d[t.dataset.onb] = t.value; }
 });
 document.addEventListener('change', ev => {
   const t = ev.target;
+  if (t.dataset.dayname) {
+    const dd = S.days.find(x => x.id === t.dataset.dayname), nn = t.value.trim().slice(0, 24);
+    if (dd && nn) { dd.name = nn; dd.short = nn.slice(0, 5); save(); }
+    render(); return;
+  }
   if (t.dataset.prof && S.profile) {
     if (t.dataset.prof === 'name') S.profile.name = t.value.trim().slice(0, 30);
     else { const v = num(t.value); S.profile.height = (isFinite(v) && v >= 120 && v <= 230) ? Math.round(v) : null; }
